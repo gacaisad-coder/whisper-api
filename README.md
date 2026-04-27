@@ -26,6 +26,27 @@ python -c "import fastapi, faster_whisper, openvino, openvino_tokenizers; print(
 uvicorn app.main:app --host 0.0.0.0 --port 8000
 ```
 
+## API 呼叫方式（SenseVoiceSmall）
+
+服務端預設模型已改為 `FunAudioLLM/SenseVoiceSmall`，因此可以不帶 `model` 參數直接呼叫：
+
+```bash
+curl http://127.0.0.1:8000/v1/audio/transcriptions \
+  -X POST \
+  -F "file=@/path/to/audio.wav" \
+  -F "response_format=json"
+```
+
+若你想明確指定模型（或覆寫成其他模型），可帶 `model`：
+
+```bash
+curl http://127.0.0.1:8000/v1/audio/transcriptions \
+  -X POST \
+  -F "file=@/path/to/audio.wav" \
+  -F "model=FunAudioLLM/SenseVoiceSmall" \
+  -F "response_format=json"
+```
+
 若你是打包成 exe，現在可直接用：
 
 ```bash
