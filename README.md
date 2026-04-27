@@ -30,6 +30,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 服務端預設模型已改為 `FunAudioLLM/SenseVoiceSmall`，因此可以不帶 `model` 參數直接呼叫：
 
+> 在 macOS ARM64（`transcribe_mac.py`）上，`FunAudioLLM/SenseVoiceSmall` 會優先走 FunASR 推理（MPS/CPU）。
+
 ```bash
 curl http://127.0.0.1:8000/v1/audio/transcriptions \
   -X POST \

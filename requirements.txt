@@ -7,3 +7,4 @@ openvino>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine !=
 openvino_tokenizers>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
 openvino-genai>=2024.3.0,<2027.0.0; platform_system != 'Darwin' or platform_machine != 'arm64'
 mlx-whisper>=0.4.2; platform_system == 'Darwin' and platform_machine == 'arm64'
+funasr>=1.1.6; platform_system == 'Darwin' and platform_machine == 'arm64'

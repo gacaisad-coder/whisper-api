@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import tempfile
+import re
 from pathlib import Path
 from dataclasses import dataclass
 from typing import Any, List, Literal, Optional
@@ -62,6 +63,118 @@ _MLX_MODEL_NAME_ALIASES: dict[str, str] = {
     "large-v3": "mlx-community/whisper-large-v3-mlx",
     "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
 }
+_MLX_REPO_ALIASES: dict[str, str] = {
+    # SenseVoiceSmall is not a CTranslate2 Whisper checkpoint and may not be
+    # directly consumable by mlx-whisper in all environments.
+    "funaudiollm/sensevoicesmall": "mlx-community/whisper-small-mlx",
+}
+_CPU_MODEL_NAME_ALIASES: dict[str, str] = {
+    "funaudiollm/sensevoicesmall": "small",
+}
+_SENSEVOICE_REPO_ID = "funaudiollm/sensevoicesmall"
+_SENSEVOICE_MODEL_CACHE: dict[str, Any] = {}
+
+
+def _canonicalize_model_name(model_name: str) -> str:
+    normalized = model_name.strip().rstrip("/")
+    if normalized.lower().startswith("https://huggingface.co/"):
+        normalized = normalized[len("https://huggingface.co/") :].strip("/")
+    if "/revision/" in normalized.lower():
+        normalized = re.split(r"/revision/", normalized, maxsplit=1, flags=re.IGNORECASE)[0]
+    return normalized
+
+
+def _normalize_cpu_model_name(model_name: str) -> str:
+    normalized = _canonicalize_model_name(model_name)
+    alias = _CPU_MODEL_NAME_ALIASES.get(normalized.lower())
+    if alias:
+        logger.warning("whisper_cpu_model_alias requested=%s resolved=%s", model_name, alias)
+        return alias
+    return normalized
+
+
+def _is_sensevoice_model(model_name: str) -> bool:
+    return _canonicalize_model_name(model_name).lower() == _SENSEVOICE_REPO_ID
+
+
+def _normalize_sensevoice_language(language: Optional[str]) -> str:
+    if not language:
+        return "auto"
+    normalized = language.strip().lower()
+    mapping = {
+        "zh": "zn",
+        "zh-cn": "zn",
+        "zh-tw": "zn",
+        "cmn": "zn",
+    }
+    return mapping.get(normalized, normalized)
+
+
+def _get_sensevoice_model(model_name: str, device: str) -> Any:
+    from funasr import AutoModel
+
+    canonical = _canonicalize_model_name(model_name)
+    cache_key = f"{canonical}|{device}"
+    if cache_key not in _SENSEVOICE_MODEL_CACHE:
+        logger.info("sensevoice_model_init cache_miss model=%s device=%s", canonical, device)
+        _SENSEVOICE_MODEL_CACHE[cache_key] = AutoModel(model=canonical, device=device, hub="hf")
+    else:
+        logger.info("sensevoice_model_init cache_hit model=%s device=%s", canonical, device)
+    return _SENSEVOICE_MODEL_CACHE[cache_key]
+
+
+def _transcribe_with_sensevoice(
+    temp_path: str,
+    model_name: str,
+    language: Optional[str],
+    require_gpu: bool,
+) -> tuple[str, Optional[str], Optional[float], List[SegmentResult], EngineDebugInfo]:
+    from funasr.utils.postprocess_utils import rich_transcription_postprocess
+
+    device_candidates = ["mps", "cpu"]
+    if require_gpu:
+        device_candidates = ["mps"]
+
+    last_exc: Optional[Exception] = None
+    for device in device_candidates:
+        try:
+            model = _get_sensevoice_model(model_name, device)
+            result = model.generate(
+                input=temp_path,
+                cache={},
+                language=_normalize_sensevoice_language(language),
+                use_itn=True,
+                batch_size_s=60,
+                merge_vad=True,
+                merge_length_s=15,
+            )
+
+            text_raw = ""
+            if isinstance(result, list) and result and isinstance(result[0], dict):
+                text_raw = str(result[0].get("text", ""))
+            text = rich_transcription_postprocess(text_raw).strip()
+
+            resolved = "apple_gpu" if device == "mps" else "cpu"
+            reason = "sensevoice_mps" if device == "mps" else "sensevoice_cpu"
+            debug = EngineDebugInfo(
+                requested="apple_gpu" if device == "mps" else "cpu",
+                resolved=resolved,
+                backend="funasr",
+                reason=reason,
+            )
+            return text, language, None, [], debug
+        except Exception as exc:
+            last_exc = exc
+            logger.warning(
+                "sensevoice_transcribe_failed model=%s device=%s err_type=%s err=%s",
+                model_name,
+                device,
+                exc.__class__.__name__,
+                exc,
+            )
+            continue
+
+    raise RuntimeError(f"SenseVoice inference failed: {last_exc}")
 
 
 def _resolve_device() -> RequestedDevice:
@@ -139,31 +252,39 @@ def _model_cache_key(model_name: str, cpu_threads: int) -> str:
 
 
 def _get_cpu_model(model_name: str) -> WhisperModel:
+    resolved_model_name = _normalize_cpu_model_name(model_name)
     cpu_threads = _cpu_threads_target()
-    cache_key = _model_cache_key(model_name, cpu_threads)
+    cache_key = _model_cache_key(resolved_model_name, cpu_threads)
     if cache_key not in _MODEL_CACHE:
         logger.info(
-            "whisper_cpu_model_init cache_miss model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            "whisper_cpu_model_init cache_miss requested=%s resolved=%s device=cpu compute_type=int8 cpu_threads=%s",
             model_name,
+            resolved_model_name,
             cpu_threads,
         )
         _MODEL_CACHE[cache_key] = WhisperModel(
-            model_name,
+            resolved_model_name,
             device="cpu",
             compute_type="int8",
             cpu_threads=cpu_threads,
         )
     else:
         logger.info(
-            "whisper_cpu_model_init cache_hit model=%s device=cpu compute_type=int8 cpu_threads=%s",
+            "whisper_cpu_model_init cache_hit requested=%s resolved=%s device=cpu compute_type=int8 cpu_threads=%s",
             model_name,
+            resolved_model_name,
             cpu_threads,
         )
     return _MODEL_CACHE[cache_key]
 
 
 def _mlx_model_candidates(model_name: str) -> List[str]:
-    normalized = model_name.strip()
+    normalized = _canonicalize_model_name(model_name)
+
+    repo_alias = _MLX_REPO_ALIASES.get(normalized.lower())
+    if repo_alias and repo_alias != normalized:
+        return [normalized, repo_alias]
+
     if "/" in normalized:
         return [normalized]
 
@@ -280,7 +401,14 @@ def transcribe_audio(
         temp_path = tmp_file.name
 
     try:
-        if engine.resolved == "apple_gpu":
+        if _is_sensevoice_model(model_name):
+            text, language_out, duration, segments, engine = _transcribe_with_sensevoice(
+                temp_path=temp_path,
+                model_name=model_name,
+                language=language,
+                require_gpu=require_gpu,
+            )
+        elif engine.resolved == "apple_gpu":
             try:
                 logger.info("whisper_apple_gpu_transcribe_start model=%s", model_name)
                 text, language_out, duration, segments = _transcribe_with_mlx(
