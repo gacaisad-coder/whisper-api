@@ -5,6 +5,7 @@ import math
 import os
 import platform
 import tempfile
+import wave
 import re
 from pathlib import Path
 from dataclasses import dataclass
@@ -175,6 +176,16 @@ def _transcribe_with_qwen3_mlx_audio(
     except TypeError:
         kwargs.pop("language", None)
         result = generate_transcription(**kwargs)
+    except AttributeError as exc:
+        if "ndim" not in str(exc):
+            raise
+        prepared_path = _prepare_qwen3_audio(temp_path)
+        kwargs["audio_path"] = prepared_path
+        try:
+            result = generate_transcription(**kwargs)
+        finally:
+            if prepared_path != temp_path and os.path.exists(prepared_path):
+                os.remove(prepared_path)
 
     text = str(getattr(result, "text", "") or "").strip()
     if not text and isinstance(result, dict):
@@ -190,6 +201,22 @@ def _transcribe_with_qwen3_mlx_audio(
     segments = _qwen3_build_segments_from_result(result)
     duration = max((seg.end for seg in segments), default=None)
     return text, language_out, duration, segments
+
+
+def _prepare_qwen3_audio(temp_path: str) -> str:
+    from faster_whisper.audio import decode_audio
+
+    audio = decode_audio(temp_path)
+    clipped = audio.clip(min=-1.0, max=1.0)
+    pcm = (clipped * 32767.0).astype("int16")
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as out_file:
+        with wave.open(out_file.name, "wb") as wav_file:
+            wav_file.setnchannels(1)
+            wav_file.setsampwidth(2)
+            wav_file.setframerate(16000)
+            wav_file.writeframes(pcm.tobytes())
+        return out_file.name
 
 
 def _normalize_sensevoice_language(language: Optional[str]) -> str:
