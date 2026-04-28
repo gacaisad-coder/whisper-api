@@ -73,6 +73,7 @@ _CPU_MODEL_NAME_ALIASES: dict[str, str] = {
 }
 _SENSEVOICE_REPO_ID = "funaudiollm/sensevoicesmall"
 _SENSEVOICE_MODEL_CACHE: dict[str, Any] = {}
+_QWEN3_ASR_MODEL_CACHE: dict[str, Any] = {}
 
 
 def _canonicalize_model_name(model_name: str) -> str:
@@ -95,6 +96,100 @@ def _normalize_cpu_model_name(model_name: str) -> str:
 
 def _is_sensevoice_model(model_name: str) -> bool:
     return _canonicalize_model_name(model_name).lower() == _SENSEVOICE_REPO_ID
+
+
+def _is_qwen3_asr_model(model_name: str) -> bool:
+    normalized = _canonicalize_model_name(model_name).lower()
+    return "qwen3-asr" in normalized
+
+
+def _qwen3_build_segments_from_result(result: Any) -> List[SegmentResult]:
+    raw_timestamps = getattr(result, "time_stamps", None)
+    if raw_timestamps is None and isinstance(result, dict):
+        raw_timestamps = result.get("time_stamps")
+    if not isinstance(raw_timestamps, list):
+        return []
+
+    segments: List[SegmentResult] = []
+    for item in raw_timestamps:
+        text = ""
+        start = 0.0
+        end = 0.0
+        if isinstance(item, dict):
+            text = str(item.get("text", "")).strip()
+            try:
+                start = float(item.get("start_time", item.get("start", 0.0)))
+            except (TypeError, ValueError):
+                start = 0.0
+            try:
+                end = float(item.get("end_time", item.get("end", start)))
+            except (TypeError, ValueError):
+                end = start
+        else:
+            text = str(getattr(item, "text", "")).strip()
+            try:
+                start = float(getattr(item, "start_time", getattr(item, "start", 0.0)))
+            except (TypeError, ValueError):
+                start = 0.0
+            try:
+                end = float(getattr(item, "end_time", getattr(item, "end", start)))
+            except (TypeError, ValueError):
+                end = start
+
+        if not text:
+            continue
+        if end < start:
+            end = start
+        segments.append(SegmentResult(id=len(segments), start=start, end=end, text=text))
+
+    return segments
+
+
+def _transcribe_with_qwen3_mlx_audio(
+    temp_path: str,
+    model_name: str,
+    language: Optional[str],
+) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
+    try:
+        from mlx_audio.stt.generate import generate_transcription
+        from mlx_audio.stt.utils import load_model
+    except Exception as exc:
+        raise RuntimeError("Qwen3-ASR requires mlx-audio. Install with: pip install -U mlx-audio") from exc
+
+    canonical = _canonicalize_model_name(model_name)
+    model = _QWEN3_ASR_MODEL_CACHE.get(canonical)
+    if model is None:
+        model = load_model(canonical)
+        _QWEN3_ASR_MODEL_CACHE[canonical] = model
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "audio_path": temp_path,
+        "verbose": True,
+    }
+    if language:
+        kwargs["language"] = language
+
+    try:
+        result = generate_transcription(**kwargs)
+    except TypeError:
+        kwargs.pop("language", None)
+        result = generate_transcription(**kwargs)
+
+    text = str(getattr(result, "text", "") or "").strip()
+    if not text and isinstance(result, dict):
+        text = str(result.get("text", "")).strip()
+    if not text:
+        raise RuntimeError("Qwen3-ASR returned empty transcript")
+
+    language_out = getattr(result, "language", None)
+    if language_out is None and isinstance(result, dict):
+        language_out = result.get("language")
+    language_out = language_out or language
+
+    segments = _qwen3_build_segments_from_result(result)
+    duration = max((seg.end for seg in segments), default=None)
+    return text, language_out, duration, segments
 
 
 def _normalize_sensevoice_language(language: Optional[str]) -> str:
@@ -634,6 +729,19 @@ def transcribe_audio(
                 model_name=model_name,
                 language=language,
                 require_gpu=require_gpu,
+            )
+        elif _is_qwen3_asr_model(model_name):
+            logger.info("qwen3_asr_transcribe_start model=%s", model_name)
+            text, language_out, duration, segments = _transcribe_with_qwen3_mlx_audio(
+                temp_path=temp_path,
+                model_name=model_name,
+                language=language,
+            )
+            engine = EngineDebugInfo(
+                requested=engine.requested,
+                resolved=engine.resolved,
+                backend="mlx-audio",
+                reason="qwen3_asr_mlx_audio",
             )
         elif engine.resolved == "apple_gpu":
             try:
