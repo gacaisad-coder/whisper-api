@@ -25,7 +25,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
             "words": ["勇気", "手に"],
         }
 
-        with patch.dict(os.environ, {}, clear=False):
+        with patch.dict(os.environ, {}, clear=True):
             parsed = tm._sensevoice_parse_timestamps(item)
 
         self.assertEqual(parsed, [("勇気", 0.0, 120.0), ("手に", 120.0, 360.0)])
@@ -36,7 +36,8 @@ class SenseVoiceUtilsTests(unittest.TestCase):
             "words": ["こんにちは", "unused"],
         }
 
-        parsed = tm._sensevoice_parse_timestamps(item)
+        with patch.dict(os.environ, {}, clear=True):
+            parsed = tm._sensevoice_parse_timestamps(item)
 
         self.assertEqual(
             parsed,
@@ -52,7 +53,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
             "words": ["勇気", "手に"],
         }
 
-        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "ms"}, clear=False):
+        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "ms"}, clear=True):
             parsed = tm._sensevoice_parse_timestamps(item)
 
         self.assertEqual(parsed, [("勇気", 0.0, 0.12), ("手に", 0.12, 0.36)])
@@ -63,7 +64,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
             "words": ["こんにちは", "unused"],
         }
 
-        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "s"}, clear=False):
+        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "s"}, clear=True):
             parsed = tm._sensevoice_parse_timestamps(item)
 
         self.assertEqual(
@@ -98,11 +99,31 @@ class SenseVoiceUtilsTests(unittest.TestCase):
             ]
         }
 
-        segments = tm._sensevoice_parse_sentence_segments(item)
+        with patch.dict(os.environ, {}, clear=True):
+            segments = tm._sensevoice_parse_sentence_segments(item)
 
         self.assertEqual(len(segments), 2)
         self.assertGreaterEqual(segments[1].start, segments[0].end)
         self.assertGreaterEqual(segments[1].end, segments[1].start)
+
+    def test_sentence_segments_auto_mode_uses_item_level_ms_evidence_for_short_blocks(self) -> None:
+        item = {
+            "timestamp": [[12000, 12600], [12600, 13900]],
+            "words": ["こんにちは", "世界"],
+            "sentence_info": [
+                {
+                    "text": "こんにちは",
+                    "timestamp": [["こんにちは", 120, 360]],
+                }
+            ],
+        }
+
+        with patch.dict(os.environ, {}, clear=True):
+            segments = tm._sensevoice_parse_sentence_segments(item)
+
+        self.assertEqual(len(segments), 1)
+        self.assertAlmostEqual(segments[0].start, 0.12)
+        self.assertAlmostEqual(segments[0].end, 0.36)
 
     def test_build_segments_are_monotonic_when_tokens_go_backward(self) -> None:
         tokens = [
@@ -127,7 +148,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
                 "SENSEVOICE_MERGE_VAD": "true",
                 "SENSEVOICE_MERGE_LENGTH_S": "22.25",
             },
-            clear=False,
+            clear=True,
         ):
             cfg = tm._sensevoice_runtime_config()
 
@@ -137,7 +158,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         self.assertEqual(cfg["merge_length_s"], 22.25)
 
     def test_env_bool_false_value(self) -> None:
-        with patch.dict(os.environ, {"SENSEVOICE_USE_ITN": "false"}, clear=False):
+        with patch.dict(os.environ, {"SENSEVOICE_USE_ITN": "false"}, clear=True):
             self.assertEqual(tm._env_bool("SENSEVOICE_USE_ITN", True), False)
 
     def test_runtime_config_defaults_match_accuracy_first_plan(self) -> None:
@@ -156,7 +177,7 @@ class SenseVoiceUtilsTests(unittest.TestCase):
                 "SENSEVOICE_BATCH_SIZE_S": "0",
                 "SENSEVOICE_MERGE_LENGTH_S": "-1",
             },
-            clear=False,
+            clear=True,
         ):
             with self.assertLogs(tm.logger, level="WARNING") as logs:
                 cfg = tm._sensevoice_runtime_config()

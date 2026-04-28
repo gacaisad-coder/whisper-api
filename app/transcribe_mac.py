@@ -172,6 +172,24 @@ def _sensevoice_collect_timestamp_values(raw: list[Any]) -> List[float]:
     return values
 
 
+def _sensevoice_resolve_item_timestamp_unit(item: dict[str, Any]) -> Literal["s", "ms"]:
+    values: List[float] = []
+    raw = item.get("timestamp")
+    if isinstance(raw, list):
+        values.extend(_sensevoice_collect_timestamp_values(raw))
+
+    sentence_info = item.get("sentence_info")
+    if isinstance(sentence_info, list):
+        for block in sentence_info:
+            if not isinstance(block, dict):
+                continue
+            ts = block.get("timestamp")
+            if isinstance(ts, list):
+                values.extend(_sensevoice_collect_timestamp_values(ts))
+
+    return _sensevoice_resolve_timestamp_unit(values)
+
+
 def _sensevoice_resolve_timestamp_unit(values: List[float]) -> Literal["s", "ms"]:
     mode = _sensevoice_timestamp_unit_mode()
     if mode == "s":
@@ -276,12 +294,15 @@ def _sensevoice_join_tokens(tokens: List[str]) -> str:
     return re.sub(r"\s+", " ", joined).strip()
 
 
-def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float, float]]:
+def _sensevoice_parse_timestamps(
+    item: dict[str, Any],
+    timestamp_unit: Optional[Literal["s", "ms"]] = None,
+) -> List[tuple[str, float, float]]:
     parsed: List[tuple[str, float, float]] = []
     raw = item.get("timestamp")
     if not isinstance(raw, list):
         return parsed
-    timestamp_unit = _sensevoice_resolve_timestamp_unit(_sensevoice_collect_timestamp_values(raw))
+    unit = timestamp_unit or _sensevoice_resolve_timestamp_unit(_sensevoice_collect_timestamp_values(raw))
     words = item.get("words")
     word_list: List[str] = []
     if isinstance(words, list):
@@ -303,8 +324,8 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
         if not token:
             continue
         try:
-            start = _sensevoice_normalize_ts(start_raw, timestamp_unit)
-            end = _sensevoice_normalize_ts(end_raw, timestamp_unit)
+            start = _sensevoice_normalize_ts(start_raw, unit)
+            end = _sensevoice_normalize_ts(end_raw, unit)
         except (TypeError, ValueError):
             continue
         if end < start:
@@ -313,13 +334,17 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
     return parsed
 
 
-def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentResult]:
+def _sensevoice_parse_sentence_segments(
+    item: dict[str, Any],
+    timestamp_unit: Optional[Literal["s", "ms"]] = None,
+) -> List[SegmentResult]:
     raw = item.get("sentence_info")
     if not isinstance(raw, list):
         return []
 
     segments: List[SegmentResult] = []
     prev_end = 0.0
+    unit = timestamp_unit or _sensevoice_resolve_item_timestamp_unit(item)
     for block in raw:
         if not isinstance(block, dict):
             continue
@@ -332,19 +357,18 @@ def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentRes
         end = 0.0
         ts = block.get("timestamp")
         if isinstance(ts, list) and ts:
-            timestamp_unit = _sensevoice_resolve_timestamp_unit(_sensevoice_collect_timestamp_values(ts))
             first = ts[0]
             last = ts[-1]
             if isinstance(first, (list, tuple)) and len(first) >= 2:
                 try:
                     first_start = first[1] if len(first) >= 3 and isinstance(first[0], str) else first[-2]
-                    start = _sensevoice_normalize_ts(first_start, timestamp_unit)
+                    start = _sensevoice_normalize_ts(first_start, unit)
                 except (TypeError, ValueError):
                     start = 0.0
             if isinstance(last, (list, tuple)) and len(last) >= 2:
                 try:
                     last_end = last[2] if len(last) >= 3 and isinstance(last[0], str) else last[-1]
-                    end = _sensevoice_normalize_ts(last_end, timestamp_unit)
+                    end = _sensevoice_normalize_ts(last_end, unit)
                 except (TypeError, ValueError):
                     end = start
         if start < prev_end:
@@ -469,19 +493,25 @@ def _transcribe_with_sensevoice(
             if isinstance(result, list):
                 for item in result:
                     if isinstance(item, dict):
+                        timestamp_unit = _sensevoice_resolve_item_timestamp_unit(item)
                         text_raw = str(item.get("text", ""))
                         text_clean = _sensevoice_verbatim_text(text_raw)
                         if text_clean:
                             text_parts.append(text_clean)
-                        sentence_segments.extend(_sensevoice_parse_sentence_segments(item))
-                        timed_tokens.extend(_sensevoice_parse_timestamps(item))
+                        sentence_segments.extend(
+                            _sensevoice_parse_sentence_segments(item, timestamp_unit=timestamp_unit)
+                        )
+                        timed_tokens.extend(_sensevoice_parse_timestamps(item, timestamp_unit=timestamp_unit))
             elif isinstance(result, dict):
+                timestamp_unit = _sensevoice_resolve_item_timestamp_unit(result)
                 text_raw = str(result.get("text", ""))
                 text_clean = _sensevoice_verbatim_text(text_raw)
                 if text_clean:
                     text_parts.append(text_clean)
-                sentence_segments.extend(_sensevoice_parse_sentence_segments(result))
-                timed_tokens.extend(_sensevoice_parse_timestamps(result))
+                sentence_segments.extend(
+                    _sensevoice_parse_sentence_segments(result, timestamp_unit=timestamp_unit)
+                )
+                timed_tokens.extend(_sensevoice_parse_timestamps(result, timestamp_unit=timestamp_unit))
 
             segments = sentence_segments or _sensevoice_build_segments(timed_tokens)
             if segments:
