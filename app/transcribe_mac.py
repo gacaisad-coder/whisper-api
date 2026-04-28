@@ -180,9 +180,19 @@ def _transcribe_with_qwen3_mlx_audio(
         if "ndim" not in str(exc):
             raise
         prepared_path = _prepare_qwen3_audio(temp_path)
-        kwargs["audio_path"] = prepared_path
         try:
-            result = generate_transcription(**kwargs)
+            kwargs["audio_path"] = prepared_path
+            try:
+                result = generate_transcription(**kwargs)
+            except AttributeError as exc2:
+                if "ndim" not in str(exc2):
+                    raise
+                audio_input = _decode_audio_for_qwen3(prepared_path)
+                model_generate_kwargs: dict[str, Any] = {"verbose": True}
+                if language:
+                    model_generate_kwargs["language"] = language
+                raw_segments = model.generate(audio_input, **model_generate_kwargs)
+                result = {"text": _qwen3_join_generated_segments(raw_segments), "segments": raw_segments, "language": language}
         finally:
             if prepared_path != temp_path and os.path.exists(prepared_path):
                 os.remove(prepared_path)
@@ -199,8 +209,63 @@ def _transcribe_with_qwen3_mlx_audio(
     language_out = language_out or language
 
     segments = _qwen3_build_segments_from_result(result)
+    if not segments:
+        raw_segments = getattr(result, "segments", None)
+        if raw_segments is None and isinstance(result, dict):
+            raw_segments = result.get("segments")
+        if isinstance(raw_segments, list):
+            segments = _qwen3_build_segments_from_generated(raw_segments)
     duration = max((seg.end for seg in segments), default=None)
     return text, language_out, duration, segments
+
+
+def _decode_audio_for_qwen3(path: str) -> Any:
+    from faster_whisper.audio import decode_audio
+
+    return decode_audio(path)
+
+
+def _qwen3_join_generated_segments(raw_segments: List[Any]) -> str:
+    texts: List[str] = []
+    for seg in raw_segments:
+        if isinstance(seg, dict):
+            token = str(seg.get("text", "")).strip()
+        else:
+            token = str(getattr(seg, "text", "")).strip()
+        if token:
+            texts.append(token)
+    return " ".join(texts).strip()
+
+
+def _qwen3_build_segments_from_generated(raw_segments: List[Any]) -> List[SegmentResult]:
+    segments: List[SegmentResult] = []
+    for seg in raw_segments:
+        if isinstance(seg, dict):
+            text = str(seg.get("text", "")).strip()
+            try:
+                start = float(seg.get("start", seg.get("start_time", 0.0)))
+            except (TypeError, ValueError):
+                start = 0.0
+            try:
+                end = float(seg.get("end", seg.get("end_time", start)))
+            except (TypeError, ValueError):
+                end = start
+        else:
+            text = str(getattr(seg, "text", "")).strip()
+            try:
+                start = float(getattr(seg, "start", getattr(seg, "start_time", 0.0)))
+            except (TypeError, ValueError):
+                start = 0.0
+            try:
+                end = float(getattr(seg, "end", getattr(seg, "end_time", start)))
+            except (TypeError, ValueError):
+                end = start
+        if not text:
+            continue
+        if end < start:
+            end = start
+        segments.append(SegmentResult(id=len(segments), start=start, end=end, text=text))
+    return segments
 
 
 def _prepare_qwen3_audio(temp_path: str) -> str:
