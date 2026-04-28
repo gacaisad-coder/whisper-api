@@ -125,7 +125,16 @@ def _is_cjk_token(token: str) -> bool:
 
 def _sensevoice_normalize_timestamp_unit(value: float) -> float:
     # SenseVoice outputs seconds in many environments, but some builds emit ms.
-    return value / 1000.0 if abs(value) >= 1000.0 else value
+    if abs(value) >= 1000.0:
+        return value / 1000.0
+    # Some payloads use integer millisecond-like offsets below 1000.
+    if abs(value) >= 100.0 and value.is_integer():
+        return value / 1000.0
+    return value
+
+
+def _sensevoice_normalize_ts(value: Any) -> float:
+    return _sensevoice_normalize_timestamp_unit(float(value))
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -232,8 +241,8 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
         if not token:
             continue
         try:
-            start = _sensevoice_normalize_timestamp_unit(float(start_raw))
-            end = _sensevoice_normalize_timestamp_unit(float(end_raw))
+            start = _sensevoice_normalize_ts(start_raw)
+            end = _sensevoice_normalize_ts(end_raw)
         except (TypeError, ValueError):
             continue
         if end < start:
@@ -266,13 +275,13 @@ def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentRes
             if isinstance(first, (list, tuple)) and len(first) >= 2:
                 try:
                     first_start = first[1] if len(first) >= 3 and isinstance(first[0], str) else first[-2]
-                    start = _sensevoice_normalize_timestamp_unit(float(first_start))
+                    start = _sensevoice_normalize_ts(first_start)
                 except (TypeError, ValueError):
                     start = 0.0
             if isinstance(last, (list, tuple)) and len(last) >= 2:
                 try:
                     last_end = last[2] if len(last) >= 3 and isinstance(last[0], str) else last[-1]
-                    end = _sensevoice_normalize_timestamp_unit(float(last_end))
+                    end = _sensevoice_normalize_ts(last_end)
                 except (TypeError, ValueError):
                     end = start
         if start < prev_end:

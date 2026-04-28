@@ -19,6 +19,16 @@ from app import transcribe_mac as tm
 
 
 class SenseVoiceUtilsTests(unittest.TestCase):
+    def test_parse_timestamps_matches_spec_example(self) -> None:
+        item = {
+            "timestamp": [[0, 120], [120, 360]],
+            "words": ["勇気", "手に"],
+        }
+
+        parsed = tm._sensevoice_parse_timestamps(item)
+
+        self.assertEqual(parsed, [("勇気", 0.0, 0.12), ("手に", 0.12, 0.36)])
+
     def test_parse_timestamps_supports_words_fallback_and_millisecond_normalization(self) -> None:
         item = {
             "timestamp": [[1200, 2500], ["!", 2600, 3900]],
@@ -41,6 +51,9 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         text = tm._sensevoice_join_tokens(tokens)
 
         self.assertEqual(text, "私は AI です。(テスト)")
+
+    def test_join_tokens_matches_spec_example(self) -> None:
+        self.assertEqual(tm._sensevoice_join_tokens(["勇気", "を", "手", "に", "。"]), "勇気を手に。")
 
     def test_sentence_segments_are_monotonic_when_source_timestamps_go_backward(self) -> None:
         item = {
@@ -93,6 +106,10 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         self.assertEqual(cfg["batch_size_s"], 90.5)
         self.assertEqual(cfg["merge_vad"], True)
         self.assertEqual(cfg["merge_length_s"], 22.25)
+
+    def test_env_bool_false_value(self) -> None:
+        with patch.dict(os.environ, {"SENSEVOICE_USE_ITN": "false"}, clear=False):
+            self.assertEqual(tm._env_bool("SENSEVOICE_USE_ITN", True), False)
 
     def test_runtime_config_defaults_match_accuracy_first_plan(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
