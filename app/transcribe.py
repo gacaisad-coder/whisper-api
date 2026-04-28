@@ -58,6 +58,7 @@ _MODEL_NAME_ALIASES: dict[str, str] = {
     "openvino/whisper-small-int8-ov": "small",
     "openvino/whisper-base-int8-ov": "base",
     "openvino/whisper-tiny-int8-ov": "tiny",
+    "funaudiollm/sensevoicesmall": "small",
 }
 
 
