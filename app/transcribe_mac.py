@@ -116,10 +116,84 @@ def _sensevoice_verbatim_text(raw_text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+_CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uff66-\uff9d]")
+
+
+def _is_cjk_token(token: str) -> bool:
+    return bool(_CJK_CHAR_RE.search(token))
+
+
+def _sensevoice_normalize_timestamp_unit(value: float) -> float:
+    # SenseVoice outputs seconds in many environments, but some builds emit ms.
+    return value / 1000.0 if abs(value) >= 1000.0 else value
+
+
+def _sensevoice_env_bool(name: str, default: bool) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    logger.warning("Invalid %s=%s, fallback=%s", name, raw, default)
+    return default
+
+
+def _sensevoice_env_int(name: str, default: int, minimum: int = 1) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning("Invalid %s=%s, fallback=%s", name, raw, default)
+        return default
+    if value < minimum:
+        logger.warning("Invalid %s=%s below minimum=%s, fallback=%s", name, raw, minimum, default)
+        return default
+    return value
+
+
+def _sensevoice_generate_kwargs(language: Optional[str]) -> dict[str, Any]:
+    return {
+        "language": _normalize_sensevoice_language(language),
+        "use_itn": _sensevoice_env_bool("SENSEVOICE_USE_ITN", True),
+        "output_timestamp": True,
+        "batch_size_s": _sensevoice_env_int("SENSEVOICE_BATCH_SIZE_S", 60),
+        "merge_vad": _sensevoice_env_bool("SENSEVOICE_MERGE_VAD", False),
+        "merge_length_s": _sensevoice_env_int("SENSEVOICE_MERGE_LENGTH_S", 15),
+    }
+
+
 def _sensevoice_join_tokens(tokens: List[str]) -> str:
     joined = ""
-    no_space_before = {".", ",", "!", "?", ":", ";", ")", "]", "}", "。", "，", "！", "？", "：", "；", "、"}
-    no_space_after = {"(", "[", "{"}
+    no_space_before = {
+        ".",
+        ",",
+        "!",
+        "?",
+        ":",
+        ";",
+        ")",
+        "]",
+        "}",
+        "(",
+        "[",
+        "{",
+        "。",
+        "，",
+        "！",
+        "？",
+        "：",
+        "；",
+        "、",
+        "（",
+        "「",
+        "『",
+    }
+    no_space_after = {"(", "[", "{", "（", "「", "『"}
     for token in tokens:
         t = token.strip()
         if not t:
@@ -127,7 +201,11 @@ def _sensevoice_join_tokens(tokens: List[str]) -> str:
         if not joined:
             joined = t
             continue
-        if t in no_space_before or joined[-1] in no_space_after:
+        prev = joined[-1]
+        if t in no_space_before or prev in no_space_after:
+            joined += t
+            continue
+        if _is_cjk_token(t) and _is_cjk_token(prev):
             joined += t
             continue
         joined += f" {t}"
@@ -160,8 +238,8 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
         if not token:
             continue
         try:
-            start = float(start_raw)
-            end = float(end_raw)
+            start = _sensevoice_normalize_timestamp_unit(float(start_raw))
+            end = _sensevoice_normalize_timestamp_unit(float(end_raw))
         except (TypeError, ValueError):
             continue
         if end < start:
@@ -176,6 +254,7 @@ def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentRes
         return []
 
     segments: List[SegmentResult] = []
+    prev_end = 0.0
     for block in raw:
         if not isinstance(block, dict):
             continue
@@ -190,18 +269,23 @@ def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentRes
         if isinstance(ts, list) and ts:
             first = ts[0]
             last = ts[-1]
-            if isinstance(first, (list, tuple)) and len(first) >= 3:
+            if isinstance(first, (list, tuple)) and len(first) >= 2:
                 try:
-                    start = float(first[1])
+                    first_start = first[1] if len(first) >= 3 and isinstance(first[0], str) else first[-2]
+                    start = _sensevoice_normalize_timestamp_unit(float(first_start))
                 except (TypeError, ValueError):
                     start = 0.0
-            if isinstance(last, (list, tuple)) and len(last) >= 3:
+            if isinstance(last, (list, tuple)) and len(last) >= 2:
                 try:
-                    end = float(last[2])
+                    last_end = last[2] if len(last) >= 3 and isinstance(last[0], str) else last[-1]
+                    end = _sensevoice_normalize_timestamp_unit(float(last_end))
                 except (TypeError, ValueError):
                     end = start
+        if start < prev_end:
+            start = prev_end
         if end < start:
             end = start
+        prev_end = end
 
         segments.append(SegmentResult(id=len(segments), start=start, end=end, text=text))
 
@@ -294,12 +378,7 @@ def _transcribe_with_sensevoice(
             result = model.generate(
                 input=temp_path,
                 cache={},
-                language=_normalize_sensevoice_language(language),
-                use_itn=True,
-                output_timestamp=True,
-                batch_size_s=60,
-                merge_vad=False,
-                merge_length_s=15,
+                **_sensevoice_generate_kwargs(language),
             )
 
             text_parts: List[str] = []
