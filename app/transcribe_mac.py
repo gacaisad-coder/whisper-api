@@ -143,9 +143,9 @@ def _transcribe_with_sensevoice(
                 input=temp_path,
                 cache={},
                 language=_normalize_sensevoice_language(language),
-                use_itn=True,
+                use_itn=False,
                 batch_size_s=60,
-                merge_vad=True,
+                merge_vad=False,
                 merge_length_s=15,
             )
 
