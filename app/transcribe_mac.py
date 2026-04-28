@@ -116,6 +116,97 @@ def _sensevoice_verbatim_text(raw_text: str) -> str:
     return re.sub(r"\s+", " ", cleaned).strip()
 
 
+def _sensevoice_join_tokens(tokens: List[str]) -> str:
+    joined = ""
+    no_space_before = {".", ",", "!", "?", ":", ";", ")", "]", "}", "。", "，", "！", "？", "：", "；", "、"}
+    no_space_after = {"(", "[", "{"}
+    for token in tokens:
+        t = token.strip()
+        if not t:
+            continue
+        if not joined:
+            joined = t
+            continue
+        if t in no_space_before or joined[-1] in no_space_after:
+            joined += t
+            continue
+        joined += f" {t}"
+    return re.sub(r"\s+", " ", joined).strip()
+
+
+def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float, float]]:
+    parsed: List[tuple[str, float, float]] = []
+    raw = item.get("timestamp")
+    if not isinstance(raw, list):
+        return parsed
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+            continue
+        token = str(entry[0]).strip()
+        if not token:
+            continue
+        try:
+            start = float(entry[1])
+            end = float(entry[2])
+        except (TypeError, ValueError):
+            continue
+        if end < start:
+            end = start
+        parsed.append((token, start, end))
+    return parsed
+
+
+def _sensevoice_build_segments(timed_tokens: List[tuple[str, float, float]]) -> List[SegmentResult]:
+    if not timed_tokens:
+        return []
+
+    sentence_endings = {".", "!", "?", "。", "！", "？"}
+    segments: List[SegmentResult] = []
+    current_tokens: List[str] = []
+    current_start = timed_tokens[0][1]
+    current_end = timed_tokens[0][2]
+
+    def flush_segment() -> None:
+        nonlocal current_tokens, current_start, current_end
+        text = _sensevoice_join_tokens(current_tokens)
+        if text:
+            segments.append(
+                SegmentResult(
+                    id=len(segments),
+                    start=current_start,
+                    end=current_end,
+                    text=text,
+                )
+            )
+        current_tokens = []
+
+    for token, start, end in timed_tokens:
+        if not current_tokens:
+            current_start = start
+            current_end = end
+            current_tokens.append(token)
+            continue
+
+        current_tokens.append(token)
+        current_end = end
+
+        segment_duration = current_end - current_start
+        current_text = _sensevoice_join_tokens(current_tokens)
+        should_flush = False
+        if token in sentence_endings and segment_duration >= 1.0:
+            should_flush = True
+        elif segment_duration >= 3.0:
+            should_flush = True
+        elif len(current_text) >= 28 and token in {",", ";", "，", "；", "、"}:
+            should_flush = True
+
+        if should_flush:
+            flush_segment()
+
+    flush_segment()
+    return segments
+
+
 def _get_sensevoice_model(model_name: str, device: str) -> Any:
     from funasr import AutoModel
 
@@ -148,12 +239,14 @@ def _transcribe_with_sensevoice(
                 cache={},
                 language=_normalize_sensevoice_language(language),
                 use_itn=False,
+                output_timestamp=True,
                 batch_size_s=60,
                 merge_vad=False,
                 merge_length_s=15,
             )
 
             text_parts: List[str] = []
+            timed_tokens: List[tuple[str, float, float]] = []
             if isinstance(result, list):
                 for item in result:
                     if isinstance(item, dict):
@@ -161,13 +254,21 @@ def _transcribe_with_sensevoice(
                         text_clean = _sensevoice_verbatim_text(text_raw)
                         if text_clean:
                             text_parts.append(text_clean)
+                        timed_tokens.extend(_sensevoice_parse_timestamps(item))
             elif isinstance(result, dict):
                 text_raw = str(result.get("text", ""))
                 text_clean = _sensevoice_verbatim_text(text_raw)
                 if text_clean:
                     text_parts.append(text_clean)
+                timed_tokens.extend(_sensevoice_parse_timestamps(result))
 
-            text = " ".join(text_parts).strip()
+            segments = _sensevoice_build_segments(timed_tokens)
+            if segments:
+                text = " ".join(seg.text for seg in segments).strip()
+                duration = max(seg.end for seg in segments)
+            else:
+                text = " ".join(text_parts).strip()
+                duration = None
             if not text:
                 raise RuntimeError("SenseVoice returned empty transcript")
 
@@ -179,7 +280,7 @@ def _transcribe_with_sensevoice(
                 backend="funasr",
                 reason=reason,
             )
-            return text, language, None, [], debug
+            return text, language, duration, segments, debug
         except Exception as exc:
             last_exc = exc
             logger.warning(
