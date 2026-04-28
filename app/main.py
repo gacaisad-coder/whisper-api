@@ -108,7 +108,7 @@ async def unhandled_exception_handler(_: Request, exc: Exception) -> JSONRespons
 @app.post("/v1/audio/transcriptions")
 async def create_transcription(
     file: UploadFile = File(...),
-    model: str = Form("FunAudioLLM/SenseVoiceSmall"),
+    model: str = Form("large-v3"),
     language: Optional[str] = Form(None),
     prompt: Optional[str] = Form(None),
     response_format: Literal["json", "verbose_json"] = Form("json"),
