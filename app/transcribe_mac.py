@@ -153,10 +153,23 @@ def _transcribe_with_sensevoice(
                 merge_length_s=15,
             )
 
-            text_raw = ""
-            if isinstance(result, list) and result and isinstance(result[0], dict):
-                text_raw = str(result[0].get("text", ""))
-            text = _sensevoice_verbatim_text(text_raw)
+            text_parts: List[str] = []
+            if isinstance(result, list):
+                for item in result:
+                    if isinstance(item, dict):
+                        text_raw = str(item.get("text", ""))
+                        text_clean = _sensevoice_verbatim_text(text_raw)
+                        if text_clean:
+                            text_parts.append(text_clean)
+            elif isinstance(result, dict):
+                text_raw = str(result.get("text", ""))
+                text_clean = _sensevoice_verbatim_text(text_raw)
+                if text_clean:
+                    text_parts.append(text_clean)
+
+            text = " ".join(text_parts).strip()
+            if not text:
+                raise RuntimeError("SenseVoice returned empty transcript")
 
             resolved = "apple_gpu" if device == "mps" else "cpu"
             reason = "sensevoice_mps" if device == "mps" else "sensevoice_cpu"
