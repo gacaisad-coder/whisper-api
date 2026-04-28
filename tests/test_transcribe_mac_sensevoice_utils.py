@@ -19,19 +19,20 @@ from app import transcribe_mac as tm
 
 
 class SenseVoiceUtilsTests(unittest.TestCase):
-    def test_parse_timestamps_matches_spec_example(self) -> None:
+    def test_parse_timestamps_auto_mode_keeps_small_integer_values_as_seconds(self) -> None:
         item = {
             "timestamp": [[0, 120], [120, 360]],
             "words": ["勇気", "手に"],
         }
 
-        parsed = tm._sensevoice_parse_timestamps(item)
+        with patch.dict(os.environ, {}, clear=False):
+            parsed = tm._sensevoice_parse_timestamps(item)
 
-        self.assertEqual(parsed, [("勇気", 0.0, 0.12), ("手に", 0.12, 0.36)])
+        self.assertEqual(parsed, [("勇気", 0.0, 120.0), ("手に", 120.0, 360.0)])
 
-    def test_parse_timestamps_supports_words_fallback_and_millisecond_normalization(self) -> None:
+    def test_parse_timestamps_auto_mode_detects_milliseconds_with_large_values(self) -> None:
         item = {
-            "timestamp": [[1200, 2500], ["!", 2600, 3900]],
+            "timestamp": [[12000, 12500], ["!", 12600, 13900]],
             "words": ["こんにちは", "unused"],
         }
 
@@ -40,8 +41,36 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         self.assertEqual(
             parsed,
             [
-                ("こんにちは", 1.2, 2.5),
-                ("!", 2.6, 3.9),
+                ("こんにちは", 12.0, 12.5),
+                ("!", 12.6, 13.9),
+            ],
+        )
+
+    def test_parse_timestamps_explicit_ms_mode_converts_to_seconds(self) -> None:
+        item = {
+            "timestamp": [[0, 120], [120, 360]],
+            "words": ["勇気", "手に"],
+        }
+
+        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "ms"}, clear=False):
+            parsed = tm._sensevoice_parse_timestamps(item)
+
+        self.assertEqual(parsed, [("勇気", 0.0, 0.12), ("手に", 0.12, 0.36)])
+
+    def test_parse_timestamps_explicit_s_mode_keeps_second_values(self) -> None:
+        item = {
+            "timestamp": [[1200, 2500], ["!", 2600, 3900]],
+            "words": ["こんにちは", "unused"],
+        }
+
+        with patch.dict(os.environ, {"SENSEVOICE_TIMESTAMP_UNIT": "s"}, clear=False):
+            parsed = tm._sensevoice_parse_timestamps(item)
+
+        self.assertEqual(
+            parsed,
+            [
+                ("こんにちは", 1200.0, 2500.0),
+                ("!", 2600.0, 3900.0),
             ],
         )
 
@@ -119,6 +148,24 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         self.assertEqual(cfg["merge_vad"], True)
         self.assertEqual(cfg["merge_length_s"], 8.0)
         self.assertEqual(cfg["use_itn"], True)
+
+    def test_runtime_config_invalid_numeric_env_falls_back_to_defaults(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "SENSEVOICE_BATCH_SIZE_S": "0",
+                "SENSEVOICE_MERGE_LENGTH_S": "-1",
+            },
+            clear=False,
+        ):
+            with self.assertLogs(tm.logger, level="WARNING") as logs:
+                cfg = tm._sensevoice_runtime_config()
+
+        self.assertEqual(cfg["batch_size_s"], 20.0)
+        self.assertEqual(cfg["merge_length_s"], 8.0)
+        joined_logs = "\n".join(logs.output)
+        self.assertIn("SENSEVOICE_BATCH_SIZE_S", joined_logs)
+        self.assertIn("SENSEVOICE_MERGE_LENGTH_S", joined_logs)
 
 
 if __name__ == "__main__":

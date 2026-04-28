@@ -123,18 +123,69 @@ def _is_cjk_token(token: str) -> bool:
     return bool(_CJK_CHAR_RE.search(token))
 
 
-def _sensevoice_normalize_timestamp_unit(value: float) -> float:
-    # SenseVoice outputs seconds in many environments, but some builds emit ms.
-    if abs(value) >= 1000.0:
-        return value / 1000.0
-    # Some payloads use integer millisecond-like offsets below 1000.
-    if abs(value) >= 100.0 and value.is_integer():
-        return value / 1000.0
-    return value
+def _sensevoice_timestamp_unit_mode() -> Literal["auto", "s", "ms"]:
+    raw = os.getenv("SENSEVOICE_TIMESTAMP_UNIT")
+    if raw is None:
+        return "auto"
+    value = raw.strip().lower()
+    if value in {"auto", "s", "ms"}:
+        return value  # type: ignore[return-value]
+    logger.warning("Invalid SENSEVOICE_TIMESTAMP_UNIT=%s, fallback=auto", raw)
+    return "auto"
 
 
-def _sensevoice_normalize_ts(value: Any) -> float:
-    return _sensevoice_normalize_timestamp_unit(float(value))
+def _sensevoice_auto_detect_milliseconds(values: List[float]) -> bool:
+    if not values:
+        return False
+
+    abs_values = [abs(v) for v in values]
+    if max(abs_values) > 10000.0:
+        return True
+
+    gt_1000_count = sum(1 for v in abs_values if v > 1000.0)
+    if gt_1000_count < 4:
+        return False
+    if gt_1000_count < math.ceil(len(abs_values) * 0.6):
+        return False
+
+    deltas = [abs(b - a) for a, b in zip(abs_values, abs_values[1:]) if a != b]
+    if len(deltas) < 3:
+        return False
+    small_delta_count = sum(1 for d in deltas if d <= 200.0)
+    return small_delta_count >= math.ceil(len(deltas) * 0.6)
+
+
+def _sensevoice_collect_timestamp_values(raw: list[Any]) -> List[float]:
+    values: List[float] = []
+    for entry in raw:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            continue
+        if len(entry) >= 3 and isinstance(entry[0], str):
+            candidates = [entry[1], entry[2]]
+        else:
+            candidates = [entry[-2], entry[-1]]
+        for candidate in candidates:
+            try:
+                values.append(float(candidate))
+            except (TypeError, ValueError):
+                continue
+    return values
+
+
+def _sensevoice_resolve_timestamp_unit(values: List[float]) -> Literal["s", "ms"]:
+    mode = _sensevoice_timestamp_unit_mode()
+    if mode == "s":
+        return "s"
+    if mode == "ms":
+        return "ms"
+    return "ms" if _sensevoice_auto_detect_milliseconds(values) else "s"
+
+
+def _sensevoice_normalize_ts(value: Any, unit: Literal["s", "ms"]) -> float:
+    ts_value = float(value)
+    if unit == "ms":
+        return ts_value / 1000.0
+    return ts_value
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -162,10 +213,20 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _sensevoice_runtime_config() -> dict[str, Any]:
+    batch_size_s = _env_float("SENSEVOICE_BATCH_SIZE_S", 20.0)
+    if batch_size_s <= 0:
+        logger.warning("Invalid SENSEVOICE_BATCH_SIZE_S=%s, fallback=%s", batch_size_s, 20.0)
+        batch_size_s = 20.0
+
+    merge_length_s = _env_float("SENSEVOICE_MERGE_LENGTH_S", 8.0)
+    if merge_length_s < 0:
+        logger.warning("Invalid SENSEVOICE_MERGE_LENGTH_S=%s, fallback=%s", merge_length_s, 8.0)
+        merge_length_s = 8.0
+
     return {
-        "batch_size_s": _env_float("SENSEVOICE_BATCH_SIZE_S", 20.0),
+        "batch_size_s": batch_size_s,
         "merge_vad": _env_bool("SENSEVOICE_MERGE_VAD", True),
-        "merge_length_s": _env_float("SENSEVOICE_MERGE_LENGTH_S", 8.0),
+        "merge_length_s": merge_length_s,
         "use_itn": _env_bool("SENSEVOICE_USE_ITN", True),
     }
 
@@ -220,6 +281,7 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
     raw = item.get("timestamp")
     if not isinstance(raw, list):
         return parsed
+    timestamp_unit = _sensevoice_resolve_timestamp_unit(_sensevoice_collect_timestamp_values(raw))
     words = item.get("words")
     word_list: List[str] = []
     if isinstance(words, list):
@@ -241,8 +303,8 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
         if not token:
             continue
         try:
-            start = _sensevoice_normalize_ts(start_raw)
-            end = _sensevoice_normalize_ts(end_raw)
+            start = _sensevoice_normalize_ts(start_raw, timestamp_unit)
+            end = _sensevoice_normalize_ts(end_raw, timestamp_unit)
         except (TypeError, ValueError):
             continue
         if end < start:
@@ -270,18 +332,19 @@ def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentRes
         end = 0.0
         ts = block.get("timestamp")
         if isinstance(ts, list) and ts:
+            timestamp_unit = _sensevoice_resolve_timestamp_unit(_sensevoice_collect_timestamp_values(ts))
             first = ts[0]
             last = ts[-1]
             if isinstance(first, (list, tuple)) and len(first) >= 2:
                 try:
                     first_start = first[1] if len(first) >= 3 and isinstance(first[0], str) else first[-2]
-                    start = _sensevoice_normalize_ts(first_start)
+                    start = _sensevoice_normalize_ts(first_start, timestamp_unit)
                 except (TypeError, ValueError):
                     start = 0.0
             if isinstance(last, (list, tuple)) and len(last) >= 2:
                 try:
                     last_end = last[2] if len(last) >= 3 and isinstance(last[0], str) else last[-1]
-                    end = _sensevoice_normalize_ts(last_end)
+                    end = _sensevoice_normalize_ts(last_end, timestamp_unit)
                 except (TypeError, ValueError):
                     end = start
         if start < prev_end:
