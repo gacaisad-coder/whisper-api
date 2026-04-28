@@ -17,6 +17,9 @@ class QwenModelDetectionTests(unittest.TestCase):
 
 
 class QwenTranscribeWrapperTests(unittest.TestCase):
+    def setUp(self):
+        tm._QWEN3_ASR_MODEL_CACHE.clear()
+
     def test_maps_qwen_result_to_existing_segment_schema(self):
         fake_utils = types.ModuleType("mlx_audio.stt.utils")
         fake_generate = types.ModuleType("mlx_audio.stt.generate")
@@ -149,6 +152,51 @@ class QwenTranscribeWrapperTests(unittest.TestCase):
         self.assertEqual(text, "こんにちは")
         self.assertEqual(language, "ja")
         self.assertEqual(duration, 1.5)
+        self.assertEqual(len(segments), 1)
+
+    def test_handles_sttoutput_container_from_model_generate(self):
+        fake_utils = types.ModuleType("mlx_audio.stt.utils")
+        fake_generate = types.ModuleType("mlx_audio.stt.generate")
+
+        class FakeSegment:
+            text = "tokyo"
+            start = 0.0
+            end = 1.0
+
+        class FakeSTTOutput:
+            def __init__(self):
+                self.segments = [FakeSegment()]
+
+        class FakeModel:
+            def generate(self, _audio, **_kwargs):
+                return FakeSTTOutput()
+
+        fake_utils.load_model = lambda _name: FakeModel()
+        fake_generate.generate_transcription = lambda **_kwargs: (_ for _ in ()).throw(AttributeError("'NoneType' object has no attribute 'ndim'"))
+
+        class FakeArray:
+            ndim = 1
+
+        with patch.dict(
+            sys.modules,
+            {
+                "mlx_audio": types.ModuleType("mlx_audio"),
+                "mlx_audio.stt": types.ModuleType("mlx_audio.stt"),
+                "mlx_audio.stt.utils": fake_utils,
+                "mlx_audio.stt.generate": fake_generate,
+            },
+            clear=False,
+        ):
+            with patch.object(tm, "_prepare_qwen3_audio", return_value="/tmp/prepared.wav"):
+                with patch.object(tm, "_decode_audio_for_qwen3", return_value=FakeArray()):
+                    text, _, duration, segments = tm._transcribe_with_qwen3_mlx_audio(
+                        temp_path="/tmp/input.mp3",
+                        model_name="mlx-community/Qwen3-ASR-1.7B-4bit",
+                        language="ja",
+                    )
+
+        self.assertEqual(text, "tokyo")
+        self.assertEqual(duration, 1.0)
         self.assertEqual(len(segments), 1)
 
 

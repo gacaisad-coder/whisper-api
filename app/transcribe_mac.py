@@ -213,7 +213,7 @@ def _transcribe_with_qwen3_mlx_audio(
         raw_segments = getattr(result, "segments", None)
         if raw_segments is None and isinstance(result, dict):
             raw_segments = result.get("segments")
-        if isinstance(raw_segments, list):
+        if raw_segments is not None:
             segments = _qwen3_build_segments_from_generated(raw_segments)
     duration = max((seg.end for seg in segments), default=None)
     return text, language_out, duration, segments
@@ -226,6 +226,12 @@ def _decode_audio_for_qwen3(path: str) -> Any:
 
 
 def _qwen3_join_generated_segments(raw_segments: List[Any]) -> str:
+    if not isinstance(raw_segments, list):
+        candidate = getattr(raw_segments, "segments", None)
+        if isinstance(candidate, list):
+            raw_segments = candidate
+        else:
+            raw_segments = []
     texts: List[str] = []
     for seg in raw_segments:
         if isinstance(seg, dict):
@@ -238,6 +244,12 @@ def _qwen3_join_generated_segments(raw_segments: List[Any]) -> str:
 
 
 def _qwen3_build_segments_from_generated(raw_segments: List[Any]) -> List[SegmentResult]:
+    if not isinstance(raw_segments, list):
+        candidate = getattr(raw_segments, "segments", None)
+        if isinstance(candidate, list):
+            raw_segments = candidate
+        else:
+            raw_segments = []
     segments: List[SegmentResult] = []
     for seg in raw_segments:
         if isinstance(seg, dict):
