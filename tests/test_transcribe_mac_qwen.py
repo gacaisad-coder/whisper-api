@@ -61,6 +61,48 @@ class QwenTranscribeWrapperTests(unittest.TestCase):
                 )
         self.assertIn("pip install -U mlx-audio", str(ctx.exception))
 
+    def test_retries_with_prepared_wav_when_audio_decode_error_occurs(self):
+        fake_utils = types.ModuleType("mlx_audio.stt.utils")
+        fake_generate = types.ModuleType("mlx_audio.stt.generate")
+        fake_utils.load_model = lambda _name: object()
+
+        class FakeResult:
+            text = "ok"
+            language = "ja"
+            time_stamps = []
+
+        calls: list[str] = []
+
+        def _fake_generate(**kwargs):
+            calls.append(str(kwargs.get("audio_path", "")))
+            if len(calls) == 1:
+                raise AttributeError("'NoneType' object has no attribute 'ndim'")
+            return FakeResult()
+
+        fake_generate.generate_transcription = _fake_generate
+
+        with patch.dict(
+            sys.modules,
+            {
+                "mlx_audio": types.ModuleType("mlx_audio"),
+                "mlx_audio.stt": types.ModuleType("mlx_audio.stt"),
+                "mlx_audio.stt.utils": fake_utils,
+                "mlx_audio.stt.generate": fake_generate,
+            },
+            clear=False,
+        ):
+            with patch.object(tm, "_prepare_qwen3_audio", return_value="/tmp/prepared.wav") as prepare_audio:
+                text, language, _, _ = tm._transcribe_with_qwen3_mlx_audio(
+                    temp_path="/tmp/input.mp3",
+                    model_name="mlx-community/Qwen3-ASR-1.7B-4bit",
+                    language="ja",
+                )
+
+        self.assertEqual(text, "ok")
+        self.assertEqual(language, "ja")
+        prepare_audio.assert_called_once_with("/tmp/input.mp3")
+        self.assertEqual(calls, ["/tmp/input.mp3", "/tmp/prepared.wav"])
+
 
 class QwenRoutingTests(unittest.TestCase):
     def test_qwen_failure_does_not_fallback_to_cpu_whisper(self):
