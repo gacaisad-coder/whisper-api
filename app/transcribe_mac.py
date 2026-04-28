@@ -238,7 +238,7 @@ def _transcribe_with_sensevoice(
                 input=temp_path,
                 cache={},
                 language=_normalize_sensevoice_language(language),
-                use_itn=False,
+                use_itn=True,
                 output_timestamp=True,
                 batch_size_s=60,
                 merge_vad=False,
@@ -490,6 +490,37 @@ def _transcribe_with_mlx(
     return text, language_out, duration, segments
 
 
+def _transcribe_with_cpu_whisper(
+    temp_path: str,
+    model_name: str,
+    language: Optional[str],
+    prompt: Optional[str],
+    temperature: float,
+) -> tuple[str, Optional[str], Optional[float], List[SegmentResult]]:
+    model = _get_cpu_model(model_name)
+    raw_segments, info = model.transcribe(
+        temp_path,
+        language=language,
+        initial_prompt=prompt,
+        temperature=temperature,
+    )
+
+    segment_results: List[SegmentResult] = []
+    texts: List[str] = []
+    for idx, seg in enumerate(raw_segments):
+        cleaned = seg.text.strip()
+        if cleaned:
+            texts.append(cleaned)
+        segment_results.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
+
+    return (
+        " ".join(texts).strip(),
+        getattr(info, "language", language),
+        getattr(info, "duration", None),
+        segment_results,
+    )
+
+
 def transcribe_audio(
     audio_bytes: bytes,
     model_name: str,
@@ -526,6 +557,56 @@ def transcribe_audio(
                 language=language,
                 require_gpu=require_gpu,
             )
+            if not segments:
+                logger.warning("sensevoice_no_segments fallback_to_whisper_for_subtitles")
+                if engine.resolved == "apple_gpu":
+                    try:
+                        text, language_out, duration, segments = _transcribe_with_mlx(
+                            temp_path=temp_path,
+                            model_name="small",
+                            language=language,
+                            prompt=prompt,
+                            temperature=temperature,
+                        )
+                        engine = EngineDebugInfo(
+                            requested=engine.requested,
+                            resolved="apple_gpu",
+                            backend="mlx-whisper",
+                            reason=f"{engine.reason};sensevoice_no_segments_fallback_mlx",
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "sensevoice_fallback_mlx_failed fallback_to_cpu err_type=%s err=%s",
+                            exc.__class__.__name__,
+                            exc,
+                        )
+                        text, language_out, duration, segments = _transcribe_with_cpu_whisper(
+                            temp_path=temp_path,
+                            model_name="small",
+                            language=language,
+                            prompt=prompt,
+                            temperature=temperature,
+                        )
+                        engine = EngineDebugInfo(
+                            requested=engine.requested,
+                            resolved="cpu",
+                            backend="ctranslate2",
+                            reason=f"{engine.reason};sensevoice_no_segments_fallback_cpu",
+                        )
+                else:
+                    text, language_out, duration, segments = _transcribe_with_cpu_whisper(
+                        temp_path=temp_path,
+                        model_name="small",
+                        language=language,
+                        prompt=prompt,
+                        temperature=temperature,
+                    )
+                    engine = EngineDebugInfo(
+                        requested=engine.requested,
+                        resolved="cpu",
+                        backend="ctranslate2",
+                        reason=f"{engine.reason};sensevoice_no_segments_fallback_cpu",
+                    )
         elif engine.resolved == "apple_gpu":
             try:
                 logger.info("whisper_apple_gpu_transcribe_start model=%s", model_name)
@@ -549,41 +630,21 @@ def transcribe_audio(
                     backend="ctranslate2",
                     reason=f"apple_gpu_fallback_to_cpu:{exc.__class__.__name__}",
                 )
-                model = _get_cpu_model(model_name)
-                raw_segments, info = model.transcribe(
-                    temp_path,
+                text, language_out, duration, segments = _transcribe_with_cpu_whisper(
+                    temp_path=temp_path,
+                    model_name=model_name,
                     language=language,
-                    initial_prompt=prompt,
+                    prompt=prompt,
                     temperature=temperature,
                 )
-                segments = []
-                texts: List[str] = []
-                for idx, seg in enumerate(raw_segments):
-                    cleaned = seg.text.strip()
-                    if cleaned:
-                        texts.append(cleaned)
-                    segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-                text = " ".join(texts).strip()
-                language_out = getattr(info, "language", language)
-                duration = getattr(info, "duration", None)
         else:
-            model = _get_cpu_model(model_name)
-            raw_segments, info = model.transcribe(
-                temp_path,
+            text, language_out, duration, segments = _transcribe_with_cpu_whisper(
+                temp_path=temp_path,
+                model_name=model_name,
                 language=language,
-                initial_prompt=prompt,
+                prompt=prompt,
                 temperature=temperature,
             )
-            segments = []
-            texts = []
-            for idx, seg in enumerate(raw_segments):
-                cleaned = seg.text.strip()
-                if cleaned:
-                    texts.append(cleaned)
-                segments.append(SegmentResult(id=idx, start=float(seg.start), end=float(seg.end), text=cleaned))
-            text = " ".join(texts).strip()
-            language_out = getattr(info, "language", language)
-            duration = getattr(info, "duration", None)
 
         logger.info("whisper_engine_final requested=%s resolved=%s backend=%s reason=%s", engine.requested, engine.resolved, engine.backend, engine.reason)
         return TranscriptionResult(
