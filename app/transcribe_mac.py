@@ -156,6 +156,44 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
     return parsed
 
 
+def _sensevoice_parse_sentence_segments(item: dict[str, Any]) -> List[SegmentResult]:
+    raw = item.get("sentence_info")
+    if not isinstance(raw, list):
+        return []
+
+    segments: List[SegmentResult] = []
+    for block in raw:
+        if not isinstance(block, dict):
+            continue
+
+        text = _sensevoice_verbatim_text(str(block.get("text", "")))
+        if not text:
+            continue
+
+        start = 0.0
+        end = 0.0
+        ts = block.get("timestamp")
+        if isinstance(ts, list) and ts:
+            first = ts[0]
+            last = ts[-1]
+            if isinstance(first, (list, tuple)) and len(first) >= 3:
+                try:
+                    start = float(first[1])
+                except (TypeError, ValueError):
+                    start = 0.0
+            if isinstance(last, (list, tuple)) and len(last) >= 3:
+                try:
+                    end = float(last[2])
+                except (TypeError, ValueError):
+                    end = start
+        if end < start:
+            end = start
+
+        segments.append(SegmentResult(id=len(segments), start=start, end=end, text=text))
+
+    return segments
+
+
 def _sensevoice_build_segments(timed_tokens: List[tuple[str, float, float]]) -> List[SegmentResult]:
     if not timed_tokens:
         return []
@@ -214,7 +252,12 @@ def _get_sensevoice_model(model_name: str, device: str) -> Any:
     cache_key = f"{canonical}|{device}"
     if cache_key not in _SENSEVOICE_MODEL_CACHE:
         logger.info("sensevoice_model_init cache_miss model=%s device=%s", canonical, device)
-        _SENSEVOICE_MODEL_CACHE[cache_key] = AutoModel(model=canonical, device=device, hub="hf")
+        _SENSEVOICE_MODEL_CACHE[cache_key] = AutoModel(
+            model=canonical,
+            device=device,
+            hub="hf",
+            trust_remote_code=True,
+        )
     else:
         logger.info("sensevoice_model_init cache_hit model=%s device=%s", canonical, device)
     return _SENSEVOICE_MODEL_CACHE[cache_key]
@@ -246,6 +289,7 @@ def _transcribe_with_sensevoice(
             )
 
             text_parts: List[str] = []
+            sentence_segments: List[SegmentResult] = []
             timed_tokens: List[tuple[str, float, float]] = []
             if isinstance(result, list):
                 for item in result:
@@ -254,15 +298,17 @@ def _transcribe_with_sensevoice(
                         text_clean = _sensevoice_verbatim_text(text_raw)
                         if text_clean:
                             text_parts.append(text_clean)
+                        sentence_segments.extend(_sensevoice_parse_sentence_segments(item))
                         timed_tokens.extend(_sensevoice_parse_timestamps(item))
             elif isinstance(result, dict):
                 text_raw = str(result.get("text", ""))
                 text_clean = _sensevoice_verbatim_text(text_raw)
                 if text_clean:
                     text_parts.append(text_clean)
+                sentence_segments.extend(_sensevoice_parse_sentence_segments(result))
                 timed_tokens.extend(_sensevoice_parse_timestamps(result))
 
-            segments = _sensevoice_build_segments(timed_tokens)
+            segments = sentence_segments or _sensevoice_build_segments(timed_tokens)
             if segments:
                 text = " ".join(seg.text for seg in segments).strip()
                 duration = max(seg.end for seg in segments)
@@ -271,6 +317,8 @@ def _transcribe_with_sensevoice(
                 duration = None
             if not text:
                 raise RuntimeError("SenseVoice returned empty transcript")
+            if not segments:
+                raise RuntimeError("SenseVoice did not return timestamp segments")
 
             resolved = "apple_gpu" if device == "mps" else "cpu"
             reason = "sensevoice_mps" if device == "mps" else "sensevoice_cpu"
@@ -557,56 +605,6 @@ def transcribe_audio(
                 language=language,
                 require_gpu=require_gpu,
             )
-            if not segments:
-                logger.warning("sensevoice_no_segments fallback_to_whisper_for_subtitles")
-                if engine.resolved == "apple_gpu":
-                    try:
-                        text, language_out, duration, segments = _transcribe_with_mlx(
-                            temp_path=temp_path,
-                            model_name="small",
-                            language=language,
-                            prompt=prompt,
-                            temperature=temperature,
-                        )
-                        engine = EngineDebugInfo(
-                            requested=engine.requested,
-                            resolved="apple_gpu",
-                            backend="mlx-whisper",
-                            reason=f"{engine.reason};sensevoice_no_segments_fallback_mlx",
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "sensevoice_fallback_mlx_failed fallback_to_cpu err_type=%s err=%s",
-                            exc.__class__.__name__,
-                            exc,
-                        )
-                        text, language_out, duration, segments = _transcribe_with_cpu_whisper(
-                            temp_path=temp_path,
-                            model_name="small",
-                            language=language,
-                            prompt=prompt,
-                            temperature=temperature,
-                        )
-                        engine = EngineDebugInfo(
-                            requested=engine.requested,
-                            resolved="cpu",
-                            backend="ctranslate2",
-                            reason=f"{engine.reason};sensevoice_no_segments_fallback_cpu",
-                        )
-                else:
-                    text, language_out, duration, segments = _transcribe_with_cpu_whisper(
-                        temp_path=temp_path,
-                        model_name="small",
-                        language=language,
-                        prompt=prompt,
-                        temperature=temperature,
-                    )
-                    engine = EngineDebugInfo(
-                        requested=engine.requested,
-                        resolved="cpu",
-                        backend="ctranslate2",
-                        reason=f"{engine.reason};sensevoice_no_segments_fallback_cpu",
-                    )
         elif engine.resolved == "apple_gpu":
             try:
                 logger.info("whisper_apple_gpu_transcribe_start model=%s", model_name)
