@@ -224,6 +224,14 @@ class QwenPostprocessTests(unittest.TestCase):
         self.assertLess(len(compacted), len(raw))
         self.assertNotIn("うん。 うん。 うん。 うん。 うん。 うん。", compacted)
 
+    def test_voice_enhance_keeps_array_shape(self):
+        import numpy as np
+
+        audio = np.array([0.0, 0.1, -0.1, 0.0, 0.02, -0.02], dtype=np.float32)
+        enhanced = tm._qwen3_enhance_voice_audio(audio, sample_rate=16000)
+        self.assertEqual(enhanced.shape, audio.shape)
+        self.assertEqual(enhanced.dtype, np.float32)
+
 
 if __name__ == "__main__":
     unittest.main()

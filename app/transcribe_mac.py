@@ -313,11 +313,39 @@ def _qwen3_compact_repetitions(text: str) -> str:
     return " ".join(compacted).strip()
 
 
+def _qwen3_enhance_voice_audio(audio: Any, sample_rate: int) -> Any:
+    import numpy as np
+
+    arr = np.asarray(audio, dtype=np.float32)
+    if arr.ndim > 1:
+        arr = np.mean(arr, axis=-1, dtype=np.float32)
+
+    if arr.size == 0:
+        return arr
+
+    arr = arr - float(np.mean(arr))
+
+    alpha = 0.97
+    hp = np.empty_like(arr, dtype=np.float32)
+    hp[0] = arr[0]
+    if arr.size > 1:
+        hp[1:] = arr[1:] - alpha * arr[:-1]
+
+    peak = float(np.max(np.abs(hp)))
+    if peak > 1e-6:
+        hp = np.clip(hp / peak * 0.98, -1.0, 1.0)
+    else:
+        hp = np.clip(hp, -1.0, 1.0)
+
+    return hp.astype(np.float32, copy=False)
+
+
 def _prepare_qwen3_audio(temp_path: str) -> str:
     from faster_whisper.audio import decode_audio
 
     audio = decode_audio(temp_path)
-    clipped = audio.clip(min=-1.0, max=1.0)
+    enhanced = _qwen3_enhance_voice_audio(audio, sample_rate=16000)
+    clipped = enhanced.clip(min=-1.0, max=1.0)
     pcm = (clipped * 32767.0).astype("int16")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as out_file:
