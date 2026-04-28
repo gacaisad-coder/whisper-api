@@ -202,6 +202,7 @@ def _transcribe_with_qwen3_mlx_audio(
         text = str(result.get("text", "")).strip()
     if not text:
         raise RuntimeError("Qwen3-ASR returned empty transcript")
+    text = _qwen3_compact_repetitions(text)
 
     language_out = getattr(result, "language", None)
     if language_out is None and isinstance(result, dict):
@@ -215,6 +216,12 @@ def _transcribe_with_qwen3_mlx_audio(
             raw_segments = result.get("segments")
         if raw_segments is not None:
             segments = _qwen3_build_segments_from_generated(raw_segments)
+    if segments:
+        for seg in segments:
+            seg.text = _qwen3_compact_repetitions(seg.text)
+        merged = " ".join(seg.text for seg in segments if seg.text).strip()
+        if merged:
+            text = merged
     duration = max((seg.end for seg in segments), default=None)
     return text, language_out, duration, segments
 
@@ -278,6 +285,32 @@ def _qwen3_build_segments_from_generated(raw_segments: List[Any]) -> List[Segmen
             end = start
         segments.append(SegmentResult(id=len(segments), start=start, end=end, text=text))
     return segments
+
+
+def _qwen3_compact_repetitions(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if not normalized:
+        return normalized
+
+    tokens = normalized.split(" ")
+    compacted: List[str] = []
+    i = 0
+    while i < len(tokens):
+        token = tokens[i]
+        run = 1
+        while i + run < len(tokens) and tokens[i + run] == token:
+            run += 1
+
+        stripped = token.strip("。．.!！？?,，、")
+        short_filler = len(stripped) <= 2
+        if run >= 6 and short_filler:
+            compacted.extend([token, token, token, "..."])
+        else:
+            compacted.extend([token] * run)
+
+        i += run
+
+    return " ".join(compacted).strip()
 
 
 def _prepare_qwen3_audio(temp_path: str) -> str:

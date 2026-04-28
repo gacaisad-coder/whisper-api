@@ -217,5 +217,13 @@ class QwenRoutingTests(unittest.TestCase):
                         cpu_path.assert_not_called()
 
 
+class QwenPostprocessTests(unittest.TestCase):
+    def test_compact_repetitions_reduces_long_short_utterance_runs(self):
+        raw = "うん。 " * 20
+        compacted = tm._qwen3_compact_repetitions(raw)
+        self.assertLess(len(compacted), len(raw))
+        self.assertNotIn("うん。 うん。 うん。 うん。 うん。 うん。", compacted)
+
+
 if __name__ == "__main__":
     unittest.main()
