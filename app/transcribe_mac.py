@@ -128,7 +128,7 @@ def _sensevoice_normalize_timestamp_unit(value: float) -> float:
     return value / 1000.0 if abs(value) >= 1000.0 else value
 
 
-def _sensevoice_env_bool(name: str, default: bool) -> bool:
+def _env_bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -141,29 +141,23 @@ def _sensevoice_env_bool(name: str, default: bool) -> bool:
     return default
 
 
-def _sensevoice_env_int(name: str, default: int, minimum: int = 1) -> int:
+def _env_float(name: str, default: float) -> float:
     raw = os.getenv(name)
     if raw is None:
         return default
     try:
-        value = int(raw.strip())
+        return float(raw.strip())
     except ValueError:
         logger.warning("Invalid %s=%s, fallback=%s", name, raw, default)
         return default
-    if value < minimum:
-        logger.warning("Invalid %s=%s below minimum=%s, fallback=%s", name, raw, minimum, default)
-        return default
-    return value
 
 
-def _sensevoice_generate_kwargs(language: Optional[str]) -> dict[str, Any]:
+def _sensevoice_runtime_config() -> dict[str, Any]:
     return {
-        "language": _normalize_sensevoice_language(language),
-        "use_itn": _sensevoice_env_bool("SENSEVOICE_USE_ITN", True),
-        "output_timestamp": True,
-        "batch_size_s": _sensevoice_env_int("SENSEVOICE_BATCH_SIZE_S", 60),
-        "merge_vad": _sensevoice_env_bool("SENSEVOICE_MERGE_VAD", False),
-        "merge_length_s": _sensevoice_env_int("SENSEVOICE_MERGE_LENGTH_S", 15),
+        "batch_size_s": _env_float("SENSEVOICE_BATCH_SIZE_S", 20.0),
+        "merge_vad": _env_bool("SENSEVOICE_MERGE_VAD", True),
+        "merge_length_s": _env_float("SENSEVOICE_MERGE_LENGTH_S", 8.0),
+        "use_itn": _env_bool("SENSEVOICE_USE_ITN", True),
     }
 
 
@@ -301,11 +295,16 @@ def _sensevoice_build_segments(timed_tokens: List[tuple[str, float, float]]) -> 
     current_tokens: List[str] = []
     current_start = timed_tokens[0][1]
     current_end = timed_tokens[0][2]
+    last_segment_end = 0.0
 
     def flush_segment() -> None:
-        nonlocal current_tokens, current_start, current_end
+        nonlocal current_tokens, current_start, current_end, last_segment_end
         text = _sensevoice_join_tokens(current_tokens)
         if text:
+            if current_start < last_segment_end:
+                current_start = last_segment_end
+            if current_end < current_start:
+                current_end = current_start
             segments.append(
                 SegmentResult(
                     id=len(segments),
@@ -314,9 +313,14 @@ def _sensevoice_build_segments(timed_tokens: List[tuple[str, float, float]]) -> 
                     text=text,
                 )
             )
+            last_segment_end = current_end
         current_tokens = []
 
     for token, start, end in timed_tokens:
+        if start < last_segment_end:
+            start = last_segment_end
+        if end < start:
+            end = start
         if not current_tokens:
             current_start = start
             current_end = end
@@ -375,10 +379,16 @@ def _transcribe_with_sensevoice(
     for device in device_candidates:
         try:
             model = _get_sensevoice_model(model_name, device)
+            cfg = _sensevoice_runtime_config()
             result = model.generate(
                 input=temp_path,
                 cache={},
-                **_sensevoice_generate_kwargs(language),
+                language=_normalize_sensevoice_language(language),
+                use_itn=cfg["use_itn"],
+                output_timestamp=True,
+                batch_size_s=cfg["batch_size_s"],
+                merge_vad=cfg["merge_vad"],
+                merge_length_s=cfg["merge_length_s"],
             )
 
             text_parts: List[str] = []

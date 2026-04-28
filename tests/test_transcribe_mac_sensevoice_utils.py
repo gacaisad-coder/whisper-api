@@ -62,25 +62,46 @@ class SenseVoiceUtilsTests(unittest.TestCase):
         self.assertGreaterEqual(segments[1].start, segments[0].end)
         self.assertGreaterEqual(segments[1].end, segments[1].start)
 
-    def test_env_parsers_and_runtime_generate_kwargs(self) -> None:
+    def test_build_segments_are_monotonic_when_tokens_go_backward(self) -> None:
+        tokens = [
+            ("first", 0.0, 1.0),
+            (".", 1.0, 1.2),
+            ("second", 0.2, 0.8),
+            (".", 0.8, 1.0),
+        ]
+
+        segments = tm._sensevoice_build_segments(tokens)
+
+        self.assertEqual(len(segments), 2)
+        self.assertGreaterEqual(segments[1].start, segments[0].end)
+        self.assertGreaterEqual(segments[1].end, segments[1].start)
+
+    def test_env_parsers_and_runtime_config(self) -> None:
         with patch.dict(
             os.environ,
             {
                 "SENSEVOICE_USE_ITN": "false",
-                "SENSEVOICE_BATCH_SIZE_S": "90",
+                "SENSEVOICE_BATCH_SIZE_S": "90.5",
                 "SENSEVOICE_MERGE_VAD": "true",
-                "SENSEVOICE_MERGE_LENGTH_S": "22",
+                "SENSEVOICE_MERGE_LENGTH_S": "22.25",
             },
             clear=False,
         ):
-            kwargs = tm._sensevoice_generate_kwargs(language="ja")
+            cfg = tm._sensevoice_runtime_config()
 
-        self.assertEqual(kwargs["language"], "ja")
-        self.assertEqual(kwargs["use_itn"], False)
-        self.assertEqual(kwargs["batch_size_s"], 90)
-        self.assertEqual(kwargs["merge_vad"], True)
-        self.assertEqual(kwargs["merge_length_s"], 22)
-        self.assertEqual(kwargs["output_timestamp"], True)
+        self.assertEqual(cfg["use_itn"], False)
+        self.assertEqual(cfg["batch_size_s"], 90.5)
+        self.assertEqual(cfg["merge_vad"], True)
+        self.assertEqual(cfg["merge_length_s"], 22.25)
+
+    def test_runtime_config_defaults_match_accuracy_first_plan(self) -> None:
+        with patch.dict(os.environ, {}, clear=True):
+            cfg = tm._sensevoice_runtime_config()
+
+        self.assertEqual(cfg["batch_size_s"], 20.0)
+        self.assertEqual(cfg["merge_vad"], True)
+        self.assertEqual(cfg["merge_length_s"], 8.0)
+        self.assertEqual(cfg["use_itn"], True)
 
 
 if __name__ == "__main__":
