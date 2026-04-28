@@ -19,6 +19,52 @@ from app import transcribe_mac as tm
 
 
 class SenseVoiceUtilsTests(unittest.TestCase):
+    def test_transcribe_with_sensevoice_enforces_monotonic_timestamps_across_result_items(self) -> None:
+        class DummySenseVoiceModel:
+            def generate(self, **kwargs):
+                return [
+                    {
+                        "text": "first",
+                        "sentence_info": [
+                            {
+                                "text": "first",
+                                "timestamp": [["first", 2.0, 3.0]],
+                            }
+                        ],
+                    },
+                    {
+                        "text": "second",
+                        "sentence_info": [
+                            {
+                                "text": "second",
+                                "timestamp": [["second", 1.0, 1.5]],
+                            }
+                        ],
+                    },
+                ]
+
+        with patch.object(tm, "_get_sensevoice_model", return_value=DummySenseVoiceModel()):
+            with patch.object(
+                tm,
+                "_sensevoice_runtime_config",
+                return_value={
+                    "batch_size_s": 20.0,
+                    "merge_vad": True,
+                    "merge_length_s": 8.0,
+                    "use_itn": True,
+                },
+            ):
+                _, _, _, segments, _ = tm._transcribe_with_sensevoice(
+                    temp_path="dummy.wav",
+                    model_name="funaudiollm/sensevoicesmall",
+                    language="ja",
+                    require_gpu=False,
+                )
+
+        self.assertEqual(len(segments), 2)
+        self.assertGreaterEqual(segments[1].start, segments[0].end)
+        self.assertGreaterEqual(segments[1].end, segments[1].start)
+
     def test_parse_timestamps_auto_mode_keeps_small_integer_values_as_seconds(self) -> None:
         item = {
             "timestamp": [[0, 120], [120, 360]],

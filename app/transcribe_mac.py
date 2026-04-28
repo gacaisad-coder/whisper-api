@@ -443,6 +443,25 @@ def _sensevoice_build_segments(timed_tokens: List[tuple[str, float, float]]) -> 
     return segments
 
 
+def _sensevoice_enforce_monotonic_segments(segments: List[SegmentResult]) -> List[SegmentResult]:
+    if not segments:
+        return []
+
+    normalized: List[SegmentResult] = []
+    prev_end = 0.0
+    for seg in segments:
+        start = seg.start
+        end = seg.end
+        if start < prev_end:
+            start = prev_end
+        if end < start:
+            end = start
+        prev_end = end
+        normalized.append(SegmentResult(id=seg.id, start=start, end=end, text=seg.text))
+
+    return normalized
+
+
 def _get_sensevoice_model(model_name: str, device: str) -> Any:
     from funasr import AutoModel
 
@@ -513,7 +532,9 @@ def _transcribe_with_sensevoice(
                 )
                 timed_tokens.extend(_sensevoice_parse_timestamps(result, timestamp_unit=timestamp_unit))
 
-            segments = sentence_segments or _sensevoice_build_segments(timed_tokens)
+            segments = _sensevoice_enforce_monotonic_segments(sentence_segments) or _sensevoice_build_segments(
+                timed_tokens
+            )
             if segments:
                 text = " ".join(seg.text for seg in segments).strip()
                 duration = max(seg.end for seg in segments)
