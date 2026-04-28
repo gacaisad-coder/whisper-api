@@ -139,15 +139,29 @@ def _sensevoice_parse_timestamps(item: dict[str, Any]) -> List[tuple[str, float,
     raw = item.get("timestamp")
     if not isinstance(raw, list):
         return parsed
+    words = item.get("words")
+    word_list: List[str] = []
+    if isinstance(words, list):
+        word_list = [str(w).strip() for w in words]
     for entry in raw:
-        if not isinstance(entry, (list, tuple)) or len(entry) < 3:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
             continue
-        token = str(entry[0]).strip()
+        token = ""
+        idx = len(parsed)
+        if len(entry) >= 3 and isinstance(entry[0], str):
+            token = str(entry[0]).strip()
+            start_raw = entry[1]
+            end_raw = entry[2]
+        else:
+            start_raw = entry[-2]
+            end_raw = entry[-1]
+            if idx < len(word_list):
+                token = word_list[idx]
         if not token:
             continue
         try:
-            start = float(entry[1])
-            end = float(entry[2])
+            start = float(start_raw)
+            end = float(end_raw)
         except (TypeError, ValueError):
             continue
         if end < start:
@@ -318,7 +332,23 @@ def _transcribe_with_sensevoice(
             if not text:
                 raise RuntimeError("SenseVoice returned empty transcript")
             if not segments:
-                raise RuntimeError("SenseVoice did not return timestamp segments")
+                result_shapes: List[str] = []
+                if isinstance(result, list):
+                    for idx, item in enumerate(result):
+                        if isinstance(item, dict):
+                            keys = ",".join(sorted(str(k) for k in item.keys()))
+                            result_shapes.append(f"item{idx}[{keys}]")
+                        else:
+                            result_shapes.append(f"item{idx}[{type(item).__name__}]")
+                elif isinstance(result, dict):
+                    keys = ",".join(sorted(str(k) for k in result.keys()))
+                    result_shapes.append(f"dict[{keys}]")
+                else:
+                    result_shapes.append(type(result).__name__)
+                raise RuntimeError(
+                    "SenseVoice did not return timestamp segments; "
+                    + "; ".join(result_shapes)
+                )
 
             resolved = "apple_gpu" if device == "mps" else "cpu"
             reason = "sensevoice_mps" if device == "mps" else "sensevoice_cpu"
