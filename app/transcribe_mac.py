@@ -249,6 +249,36 @@ def _sensevoice_runtime_config() -> dict[str, Any]:
     }
 
 
+def _sensevoice_preprocess_enabled() -> bool:
+    return _env_bool("SENSEVOICE_PREPROCESS_ENABLED", True)
+
+
+def _prepare_sensevoice_audio(temp_path: str) -> str:
+    from faster_whisper.audio import decode_audio
+    import numpy as np
+    import wave
+
+    audio = decode_audio(temp_path)
+    if audio is None or len(audio) == 0:
+        raise RuntimeError("Failed to decode audio for SenseVoice preprocessing")
+
+    peak = float(np.max(np.abs(audio)))
+    if peak > 0:
+        audio = (audio / peak) * 0.95
+
+    pcm16 = np.clip(audio * 32767.0, -32768, 32767).astype(np.int16)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as out:
+        prepared_path = out.name
+
+    with wave.open(prepared_path, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(pcm16.tobytes())
+
+    return prepared_path
+
+
 def _sensevoice_join_tokens(tokens: List[str]) -> str:
     joined = ""
     no_space_before = {
@@ -495,16 +525,24 @@ def _transcribe_with_sensevoice(
         try:
             model = _get_sensevoice_model(model_name, device)
             cfg = _sensevoice_runtime_config()
-            result = model.generate(
-                input=temp_path,
-                cache={},
-                language=_normalize_sensevoice_language(language),
-                use_itn=cfg["use_itn"],
-                output_timestamp=True,
-                batch_size_s=cfg["batch_size_s"],
-                merge_vad=cfg["merge_vad"],
-                merge_length_s=cfg["merge_length_s"],
-            )
+            inference_path = temp_path
+            if _sensevoice_preprocess_enabled():
+                inference_path = _prepare_sensevoice_audio(temp_path)
+                logger.info("sensevoice_preprocess_audio prepared=%s", inference_path)
+            try:
+                result = model.generate(
+                    input=inference_path,
+                    cache={},
+                    language=_normalize_sensevoice_language(language),
+                    use_itn=cfg["use_itn"],
+                    output_timestamp=True,
+                    batch_size_s=cfg["batch_size_s"],
+                    merge_vad=cfg["merge_vad"],
+                    merge_length_s=cfg["merge_length_s"],
+                )
+            finally:
+                if inference_path != temp_path and os.path.exists(inference_path):
+                    os.remove(inference_path)
 
             text_parts: List[str] = []
             sentence_segments: List[SegmentResult] = []

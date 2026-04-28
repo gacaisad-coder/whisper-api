@@ -19,6 +19,91 @@ from app import transcribe_mac as tm
 
 
 class SenseVoiceUtilsTests(unittest.TestCase):
+    def test_prepare_sensevoice_audio_produces_wav_file(self) -> None:
+        class FakeArray:
+            def __init__(self, values):
+                self.values = values
+
+            def __len__(self):
+                return len(self.values)
+
+            def __iter__(self):
+                return iter(self.values)
+
+            def __truediv__(self, value):
+                return FakeArray([v / value for v in self.values])
+
+            def __mul__(self, value):
+                return FakeArray([v * value for v in self.values])
+
+            def astype(self, _dtype):
+                return self
+
+            def tobytes(self):
+                return b"\x00\x00" * len(self.values)
+
+        class FakeNumpy:
+            int16 = object()
+
+            @staticmethod
+            def max(values):
+                return max(abs(v) for v in values.values)
+
+            @staticmethod
+            def abs(values):
+                return values
+
+            @staticmethod
+            def clip(values, *_args):
+                return values
+
+        class DummyWaveFile:
+            def __init__(self):
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                self.closed = True
+
+            def setnchannels(self, _v):
+                pass
+
+            def setsampwidth(self, _v):
+                pass
+
+            def setframerate(self, _v):
+                pass
+
+            def writeframes(self, _v):
+                pass
+
+        fake_audio = FakeArray([0.2, -0.3, 0.8])
+        fake_audio_module = types.ModuleType("faster_whisper.audio")
+        fake_audio_module.decode_audio = lambda _path: fake_audio
+        with patch.dict(
+            sys.modules,
+            {
+                "numpy": FakeNumpy,
+                "faster_whisper.audio": fake_audio_module,
+            },
+            clear=False,
+        ):
+            with patch("wave.open", return_value=DummyWaveFile()):
+                path = tm._prepare_sensevoice_audio("dummy.wav")
+
+        self.assertTrue(path.endswith(".wav"))
+        if os.path.exists(path):
+            os.remove(path)
+
+    def test_preprocess_toggle_reads_env(self) -> None:
+        with patch.dict(os.environ, {"SENSEVOICE_PREPROCESS_ENABLED": "false"}, clear=True):
+            self.assertEqual(tm._sensevoice_preprocess_enabled(), False)
+
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(tm._sensevoice_preprocess_enabled(), True)
+
     def test_transcribe_with_sensevoice_enforces_monotonic_timestamps_across_result_items(self) -> None:
         class DummySenseVoiceModel:
             def generate(self, **kwargs):
@@ -44,22 +129,23 @@ class SenseVoiceUtilsTests(unittest.TestCase):
                 ]
 
         with patch.object(tm, "_get_sensevoice_model", return_value=DummySenseVoiceModel()):
-            with patch.object(
-                tm,
-                "_sensevoice_runtime_config",
-                return_value={
-                    "batch_size_s": 20.0,
+            with patch.object(tm, "_sensevoice_preprocess_enabled", return_value=False):
+                with patch.object(
+                    tm,
+                    "_sensevoice_runtime_config",
+                    return_value={
+                        "batch_size_s": 20.0,
                     "merge_vad": True,
                     "merge_length_s": 8.0,
                     "use_itn": True,
                 },
             ):
-                _, _, _, segments, _ = tm._transcribe_with_sensevoice(
-                    temp_path="dummy.wav",
-                    model_name="funaudiollm/sensevoicesmall",
-                    language="ja",
-                    require_gpu=False,
-                )
+                    _, _, _, segments, _ = tm._transcribe_with_sensevoice(
+                        temp_path="dummy.wav",
+                        model_name="funaudiollm/sensevoicesmall",
+                        language="ja",
+                        require_gpu=False,
+                    )
 
         self.assertEqual(len(segments), 2)
         self.assertGreaterEqual(segments[1].start, segments[0].end)
