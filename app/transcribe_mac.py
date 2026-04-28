@@ -340,12 +340,18 @@ def _qwen3_enhance_voice_audio(audio: Any, sample_rate: int) -> Any:
     return hp.astype(np.float32, copy=False)
 
 
+def _qwen3_audio_enhance_enabled() -> bool:
+    return _env_bool("QWEN3_AUDIO_ENHANCE_ENABLED", False)
+
+
 def _prepare_qwen3_audio(temp_path: str) -> str:
     from faster_whisper.audio import decode_audio
 
     audio = decode_audio(temp_path)
-    enhanced = _qwen3_enhance_voice_audio(audio, sample_rate=16000)
-    clipped = enhanced.clip(min=-1.0, max=1.0)
+    prepared = audio
+    if _qwen3_audio_enhance_enabled():
+        prepared = _qwen3_enhance_voice_audio(audio, sample_rate=16000)
+    clipped = prepared.clip(min=-1.0, max=1.0)
     pcm = (clipped * 32767.0).astype("int16")
 
     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as out_file:

@@ -232,6 +232,10 @@ class QwenPostprocessTests(unittest.TestCase):
         self.assertEqual(enhanced.shape, audio.shape)
         self.assertEqual(enhanced.dtype, np.float32)
 
+    def test_qwen_audio_enhance_env_defaults_off(self):
+        with patch.dict("os.environ", {}, clear=False):
+            self.assertFalse(tm._qwen3_audio_enhance_enabled())
+
 
 if __name__ == "__main__":
     unittest.main()
