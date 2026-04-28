@@ -110,6 +110,12 @@ def _normalize_sensevoice_language(language: Optional[str]) -> str:
     return mapping.get(normalized, normalized)
 
 
+def _sensevoice_verbatim_text(raw_text: str) -> str:
+    # Keep transcript close to original words: remove control tokens only.
+    cleaned = re.sub(r"<\|[^|]+\|>", " ", raw_text)
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
 def _get_sensevoice_model(model_name: str, device: str) -> Any:
     from funasr import AutoModel
 
@@ -129,8 +135,6 @@ def _transcribe_with_sensevoice(
     language: Optional[str],
     require_gpu: bool,
 ) -> tuple[str, Optional[str], Optional[float], List[SegmentResult], EngineDebugInfo]:
-    from funasr.utils.postprocess_utils import rich_transcription_postprocess
-
     device_candidates = ["mps", "cpu"]
     if require_gpu:
         device_candidates = ["mps"]
@@ -152,7 +156,7 @@ def _transcribe_with_sensevoice(
             text_raw = ""
             if isinstance(result, list) and result and isinstance(result[0], dict):
                 text_raw = str(result[0].get("text", ""))
-            text = rich_transcription_postprocess(text_raw).strip()
+            text = _sensevoice_verbatim_text(text_raw)
 
             resolved = "apple_gpu" if device == "mps" else "cpu"
             reason = "sensevoice_mps" if device == "mps" else "sensevoice_cpu"
