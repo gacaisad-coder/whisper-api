@@ -103,6 +103,54 @@ class QwenTranscribeWrapperTests(unittest.TestCase):
         prepare_audio.assert_called_once_with("/tmp/input.mp3")
         self.assertEqual(calls, ["/tmp/input.mp3", "/tmp/prepared.wav"])
 
+    def test_falls_back_to_model_generate_with_waveform_when_loader_returns_none(self):
+        fake_utils = types.ModuleType("mlx_audio.stt.utils")
+        fake_generate = types.ModuleType("mlx_audio.stt.generate")
+
+        class FakeSegment:
+            text = "こんにちは"
+            start = 0.0
+            end = 1.5
+
+        class FakeModel:
+            def generate(self, audio, **_kwargs):
+                self.last_audio = audio
+                return [FakeSegment()]
+
+        fake_model = FakeModel()
+        fake_utils.load_model = lambda _name: fake_model
+
+        def _always_none_error(**_kwargs):
+            raise AttributeError("'NoneType' object has no attribute 'ndim'")
+
+        fake_generate.generate_transcription = _always_none_error
+
+        class FakeArray:
+            ndim = 1
+
+        with patch.dict(
+            sys.modules,
+            {
+                "mlx_audio": types.ModuleType("mlx_audio"),
+                "mlx_audio.stt": types.ModuleType("mlx_audio.stt"),
+                "mlx_audio.stt.utils": fake_utils,
+                "mlx_audio.stt.generate": fake_generate,
+            },
+            clear=False,
+        ):
+            with patch.object(tm, "_prepare_qwen3_audio", return_value="/tmp/prepared.wav"):
+                with patch.object(tm, "_decode_audio_for_qwen3", return_value=FakeArray()):
+                    text, language, duration, segments = tm._transcribe_with_qwen3_mlx_audio(
+                        temp_path="/tmp/input.mp3",
+                        model_name="mlx-community/Qwen3-ASR-1.7B-4bit",
+                        language="ja",
+                    )
+
+        self.assertEqual(text, "こんにちは")
+        self.assertEqual(language, "ja")
+        self.assertEqual(duration, 1.5)
+        self.assertEqual(len(segments), 1)
+
 
 class QwenRoutingTests(unittest.TestCase):
     def test_qwen_failure_does_not_fallback_to_cpu_whisper(self):
